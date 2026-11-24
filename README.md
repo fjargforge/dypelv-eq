@@ -1,9 +1,17 @@
 # Dypelv EQ
 
-A parametric equaliser for ambient and dark ambient, by Fjarg. VST3, Audio Unit and standalone.
+A free, open-source parametric equaliser for ambient and dark ambient, by Fjarg. VST3, Audio Unit and standalone.
 Slow, smooth, and quiet to look at: one dark plot, round nodes, no knobs.
 
-**Status: early version (0.1.0).** Built and used on an Apple Silicon Mac. The Windows build script is there but has never been run. Expect rough edges.
+![Dypelv EQ](docs/main.png)
+
+| Movement: LFO per band | Bands, stereo modes, dynamics |
+|---|---|
+| ![LFO](docs/lfo.png) | ![Menu](docs/menu.png) |
+
+[Download](../../releases/latest) · [Changelog](CHANGELOG.md) · [Report a bug](../../issues/new/choose)
+
+**Status: early version (0.1.1).** Built and used on an Apple Silicon Mac. On Windows the standalone app has been tested; the VST3 has not yet been tried in a host. Expect rough edges.
 
 ## What it does
 
@@ -44,7 +52,11 @@ Then rescan plugins in your host.
 
 ### Windows
 
-`Build.bat` and `Installer/DypelvEQ.iss` are written but untested. Needs Visual Studio with the "Desktop development with C++" workload. Reports and fixes are welcome.
+Download `DypelvEQ-Setup-*.exe` from the Releases page and run it. The installer is not code-signed, so Windows SmartScreen will warn you:
+click **More info**, then **Run anyway**. It installs the VST3 to `C:\Program Files\Common Files\VST3` and the standalone app.
+
+To build it yourself: install Visual Studio with the "Desktop development with C++" workload, CMake and Git, then run `Build.bat`.
+The standalone app works; the VST3 is untested in DAWs, so reports and fixes are welcome.
 
 ## Licence
 

@@ -2,7 +2,7 @@
 ; Build.bat runs it automatically when Inno Setup is installed. Do not change AppId, it identifies the app for updates and uninstall.
 
 #ifndef AppVer
-  #define AppVer "0.1.0"
+  #define AppVer "0.1.1"
 #endif
 #define AppName "Dypelv EQ"
 #define Pub     "Fjarg"

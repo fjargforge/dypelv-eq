@@ -1265,7 +1265,7 @@ void EQProcessor::applySolo (juce::AudioBuffer<float>& buffer, int numCh, int n)
     for (int b = 0; b < EQ::numBands; ++b)
         if (p[(size_t) b].on->load() > 0.5f && p[(size_t) b].solo->load() > 0.5f) { sb = b; break; }
 
-    if (sb < 0) { soloF = soloQ = -1.0f; soloMode = -1; return; }
+    if (sb < 0) { soloF = soloQ = -1.0f; soloMode = -1; soloMono.store (false); monoPm = monoPs = 0.0f; return; }
 
     const int type = (int) std::lround (p[(size_t) sb].type->load());
     const int split = EQ::hasGain (type) ? (int) std::lround (p[(size_t) sb].split->load()) : 0;
@@ -1280,9 +1280,11 @@ void EQProcessor::applySolo (juce::AudioBuffer<float>& buffer, int numCh, int n)
         soloFilt[0].set (c);
         soloFilt[1].set (c);
     }
+    if (mode != EQ::Mid && mode != EQ::Side) { soloMono.store (false); monoPm = monoPs = 0.0f; }
     if (mode != soloMode)
     {
         soloMode = mode;
+        monoPm = monoPs = 0.0f;
         for (auto& sf : soloFilt) sf.reset();      // another signal goes through the filter now
     }
 
@@ -1300,7 +1302,18 @@ void EQProcessor::applySolo (juce::AudioBuffer<float>& buffer, int numCh, int n)
         const auto* dl = dry.getReadPointer (0);
         const auto* dr = dry.getReadPointer (1);
         const float sgn = mode == EQ::Mid ? 1.0f : -1.0f;
-        for (int i = 0; i < n; ++i) l[i] = 0.5f * (dl[i] + sgn * dr[i]);
+        float pm = 0.0f, ps = 0.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            pm = std::max (pm, std::abs (0.5f * (dl[i] + dr[i])));
+            ps = std::max (ps, std::abs (0.5f * (dl[i] - dr[i])));
+            l[i] = 0.5f * (dl[i] + sgn * dr[i]);
+        }
+        // is there anything in Side at all? Peaks with a 0.3 s memory, so a quiet stretch does not make the notice flicker
+        const float keep = (float) std::exp (-(double) n / (0.3 * sampleRate));
+        monoPm = std::max (pm, monoPm * keep);
+        monoPs = std::max (ps, monoPs * keep);
+        soloMono.store (mode == EQ::Side && monoPm > 1.0e-3f && monoPs < 1.0e-5f);
         soloFilt[0].process (l, n);
         std::copy (l, l + n, r);
     }

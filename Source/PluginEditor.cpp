@@ -1727,6 +1727,8 @@ void EQEditor::timerCallback()
         syncFullIcon();      // the OS can leave full screen on its own (Esc, the green button)
         const bool armed = proc.learnParam.load() >= 0;
         if (armed != lastArmed) { lastArmed = armed; repaint (statusRect); }
+        const bool monoHint = proc.soloMono.load();
+        if (monoHint != lastMonoHint) { lastMonoHint = monoHint; repaint (statusRect); }
         const int lt = proc.learnTick.load();
         if (lt != lastLearnTick)
         {
@@ -1768,7 +1770,12 @@ void EQEditor::timerCallback()
             for (auto* L : { &layIn, &layOut })
             {
                 L->smoothed.assign ((size_t) N / 2, -120.0f);
+                L->avgPow.clear();
+                // the running sums must match the bins: zeros here against bins of -120 made the low columns read 0 dB (a full-height block
+                // below ~85 Hz) for as long as no audio arrived to rebuild them, e.g. when the audio device was not running
                 L->prefix.assign (L->smoothed.size() + 1, 0.0);
+                for (size_t i = 0; i < L->smoothed.size(); ++i)
+                    L->prefix[i + 1] = L->prefix[i] + (double) L->smoothed[i];
             }
             rbIn = rbOut = true;
         }
@@ -2341,6 +2348,12 @@ void EQEditor::paint (juce::Graphics& g)
                                            RectanglePlacement::centred, 1.0f);
         g.drawText (armed ? juce::String ("MIDI learn: move a controller to assign it   |   Esc: cancel") : flashMsg,
                     statusRect.withTrimmedLeft (26), Justification::centredLeft);
+    }
+    else if (lastMonoHint)       // Side is soloed, but left and right are identical: nothing to hear, nothing is broken
+    {
+        g.setFont (11.0f);
+        g.setColour (kAmber);
+        g.drawText ("Side is silent: the signal here is mono (left and right are identical)", statusRect, Justification::centredLeft);
     }
 }
 

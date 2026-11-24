@@ -224,6 +224,7 @@ public:
     std::array<std::atomic<float>, EQ::numBands> effLevel {}, effThr {}, lfoPhX {}, lfoPhY {};
     std::atomic<uint32_t> blockCount { 0 };
     std::atomic<float> autoGainDb { 0.0f };
+    std::atomic<bool> soloMono { false };      // Side is soloed but the signal is mono (left = right), so there is nothing to hear
 
     // ---- MIDI learn: any parameter can follow a controller (CC). Mappings are saved with the session.
     void armMidiLearn (const juce::String& paramId);
@@ -270,6 +271,7 @@ private:
     std::array<Ptrs, EQ::numBands> p;
     std::atomic<float> *pBypass = nullptr, *pAnaOn = nullptr, *pDelta = nullptr, *pAutoGain = nullptr, *pOutGain = nullptr;
     float deltaMix = 0.0f, autoGain = 1.0f, trimGain = 1.0f;
+    float monoPm = 0.0f, monoPs = 0.0f;        // running peaks of Mid and Side while Side is soloed
     double pIn = 0.0, pOut = 0.0;
     double hostBpm = 0.0, hostPpq = -1.0;
     bool hostPlaying = false;

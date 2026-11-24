@@ -219,7 +219,7 @@ private:
     // status flash (MIDI learn feedback), full screen
     juce::String flashMsg;
     int flashTicks = 0, lastLearnTick = 0;
-    bool maximised = false, lastArmed = false, lastFull = false;
+    bool maximised = false, lastArmed = false, lastFull = false, lastMonoHint = false;
 
     // interface scale: the host may set its own scale (Windows) and overwrite ours, so the timer notices and puts ours back on top
     int uiScalePct = 100;

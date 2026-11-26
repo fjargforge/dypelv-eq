@@ -9,6 +9,7 @@ Codes of this plugin: manufacturer `Fjrg`, plugin `Dypl`, type `aufx` (effect). 
   The free JUCE 8 tier ("Starter") covers closed-source releases while revenue / funding stays under 20 000 USD a year; there is no splash screen
   any more. Register on juce.com and read the current EULA before the first public release (this note comes from JUCE's forum, not from the EULA itself).
 - **Version.** `project(... VERSION ...)` in `CMakeLists.txt`, and `AppVer` in `Installer/DypelvEQ.iss` (or `iscc /DAppVer=0.2.0`).
+- **Release files.** `DypelvEQ-<version>-mac.zip` (from `Output` on the Mac) and `DypelvEQ-windows.zip` (made by `Build.bat`; keep this exact name, `Install-Windows.ps1` downloads `releases/latest/download/DypelvEQ-windows.zip`).
 - **Clean build** from an empty `build` folder: `Build.command` (Mac), `Build.bat` (Windows). Zero warnings that matter.
 
 ## 1. pluginval (works on Mac and Windows)
@@ -25,7 +26,7 @@ Download from https://github.com/Tracktion/pluginval/releases. Strictness 5 is t
 ```
 
 Things most likely to be reported here: parameter changes from the host thread while the editor is open, state restore with
-old sessions (parameters were only ever added, never renamed), latency changes with the phase mode (that parameter is not automatable on purpose).
+old sessions (0.2.0 replaced the dynamics parameters Ratio / Knee / Mode / Sidechain: they are converted in `migrateDynamics`; all other parameters were only ever added), latency changes with the phase mode (that parameter is not automatable on purpose).
 
 ## 2. auval (Mac, Audio Units only)
 

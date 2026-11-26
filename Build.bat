@@ -43,6 +43,9 @@ if exist "%ART%\Standalone\Dypelv EQ.exe" copy /y "%ART%\Standalone\Dypelv EQ.ex
 dir /b Output >nul 2>nul
 if errorlevel 1 goto nofiles
 
+rem ---- DypelvEQ-windows.zip: what Install-Windows.ps1 downloads from the GitHub release ----
+powershell -NoProfile -Command "Get-ChildItem 'Output' | Where-Object { $_.Extension -ne '.zip' -and $_.Name -notlike 'DypelvEQ-Setup*' } | Compress-Archive -DestinationPath 'Output\DypelvEQ-windows.zip' -Force"
+
 rem ---- installer (needs Inno Setup, free) ----
 set "ISCC="
 where iscc >nul 2>nul && set "ISCC=iscc"
@@ -71,7 +74,9 @@ echo The installer script failed. Send me the text above. The plain files in Out
 echo.
 echo Done. Your files are in: %cd%\Output
 echo.
-echo Without the installer: copy the folder "Dypelv EQ.vst3" from Output to
+echo For the GitHub release: Output\DypelvEQ-windows.zip (Install-Windows.ps1 downloads it).
+echo.
+echo By hand: copy the folder "Dypelv EQ.vst3" from Output to
 echo   C:\Program Files\Common Files\VST3
 echo (needs administrator rights), then rescan plugins in the DAW.
 start "" Output

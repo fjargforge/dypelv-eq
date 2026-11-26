@@ -17,7 +17,10 @@ if ! command -v cmake >/dev/null 2>&1; then
   fi
 fi
 
-cmake -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release || { echo "Configure failed."; read -p "Press Enter"; exit 1; }
+# Always start from a clean build folder, so an old cache can never leave an arm64-only plugin behind.
+# The plugin is built universal (Apple Silicon + Intel), so it also loads inside Rosetta hosts (x86_64 REAPER etc.).
+rm -rf build
+cmake -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" || { echo "Configure failed."; read -p "Press Enter"; exit 1; }
 cmake --build build --config Release -j 8 || { echo "Build failed. Send me the red error text."; read -p "Press Enter"; exit 1; }
 
 rm -rf Output && mkdir -p Output
@@ -39,6 +42,14 @@ fi
 
 for f in Output/*; do codesign --force --deep -s - "$f"; done
 xattr -dr com.apple.quarantine Output 2>/dev/null
+
+echo ""
+echo "Architectures (must show: x86_64 arm64):"
+for f in Output/*.vst3 Output/*.component; do
+  [ -e "$f" ] || continue
+  bin="$f/Contents/MacOS/$(ls "$f/Contents/MacOS" | head -n 1)"
+  echo "  $(basename "$f"): $(lipo -archs "$bin" 2>/dev/null)"
+done
 
 echo ""
 echo "Done. Your files are in: $(pwd)/Output"

@@ -1,6 +1,7 @@
 #include "PluginEditor.h"
 #include "Presets.h"
 #include "Settings.h"
+#include <map>
 
 namespace
 {
@@ -633,12 +634,26 @@ bool EQEditor::animated (int b) const
     const int type = (int) std::lround (get (b, "type"));
     return get (b, "lxs") > 0.5f || get (b, "lys") > 0.5f || (get (b, "dyn") > 0.5f && EQ::hasGain (type));
 }
-float EQEditor::effFreq (int b) const { return audioActive && animated (b) ? proc.effF[(size_t) b].load() : get (b, "freq"); }
-float EQEditor::effGain (int b) const { return audioActive && animated (b) ? proc.effG[(size_t) b].load() : get (b, "gain"); }
-float EQEditor::effQ (int b) const { return audioActive && animated (b) ? proc.effQ[(size_t) b].load() : get (b, "q"); }
+// Frequency and Q move on their own only with an LFO. Dynamics change the gain alone, so a dynamic band without an LFO draws its frequency and Q straight
+// from the parameters: the audio thread glides the frequency over about 80 ms, which made the curve trail behind the node while it was dragged.
+float EQEditor::effFreq (int b) const { return audioActive && get (b, "lxs") > 0.5f ? proc.effF[(size_t) b].load() : get (b, "freq"); }
+// A band that is only dynamic (no LFO): its gain is the Gain you set plus what the dynamics add right now. The Gain comes straight from the
+// parameter, so dragging the node never lags behind the audio thread (that lag used to flash a small "+0.1" and a ghost dot next to the node).
+bool EQEditor::dynOnly (int b) const
+{
+    const int type = (int) std::lround (get (b, "type"));
+    return get (b, "dyn") > 0.5f && EQ::hasGain (type) && get (b, "lxs") < 0.5f && get (b, "lys") < 0.5f;
+}
+float EQEditor::effGain (int b) const
+{
+    if (! audioActive || ! animated (b)) return get (b, "gain");
+    return dynOnly (b) ? get (b, "gain") + proc.effDyn[(size_t) b].load() : proc.effG[(size_t) b].load();
+}
+float EQEditor::effQ (int b) const { return audioActive && get (b, "lys") > 0.5f ? proc.effQ[(size_t) b].load() : get (b, "q"); }
 float EQEditor::effGain2 (int b) const
 {
-    return audioActive && animated (b) ? proc.effG2[(size_t) b].load() : -get (b, "gain");   // linked pair: mirrored gain
+    if (! audioActive || ! animated (b)) return -get (b, "gain");          // linked pair: mirrored gain
+    return dynOnly (b) ? -(get (b, "gain") + proc.effDyn[(size_t) b].load()) : proc.effG2[(size_t) b].load();
 }
 
 // Nodes are drawn lowest index first and the selected band last (on top), so hit-testing
@@ -736,7 +751,7 @@ void EQEditor::positionCard()
 void EQEditor::resetBand (int b)
 {
     for (auto name : { "on", "solo", "mute", "gain", "type", "ch", "q", "slp", "freq", "split",
-                       "dyn", "dthr", "dknee", "datk", "drel", "dmix", "dauto", "dmode", "dratio", "dsc",
+                       "dyn", "dthr", "dwid", "dgain", "datk", "drel", "dmix", "dauto", "ddet", "dfol", "dfreq", "dq",
                        "lxs", "lxd", "lxr", "lxa", "lxm", "lys", "lyd", "lyr", "lya", "lym" })
         if (auto* p = proc.apvts.getParameter (EQ::id (b, name)))
             p->setValueNotifyingHost (p->getDefaultValue());
@@ -787,6 +802,8 @@ void EQEditor::invertBand (int b)
     if (EQ::hasGain (type))
     {
         setParamGesture (EQ::id (b, "gain"), -get (b, "gain"));      // a linked pair mirrors it automatically
+        if (get (b, "dyn") > 0.5f)                                   // a dynamic band flips both ends: Rest and Active
+            setParamGesture (EQ::id (b, "dgain"), -get (b, "dgain"));
     }
     else if (type == EQ::Notch)    setParamGesture (EQ::id (b, "type"), (float) EQ::BandPass);
     else if (type == EQ::BandPass) setParamGesture (EQ::id (b, "type"), (float) EQ::Notch);
@@ -809,15 +826,17 @@ void EQEditor::splitBand (int b, int mode, bool inverted)
     if (wasPair) mode = (int) std::lround (get (b, "split"));   // separating a linked pair keeps its own mode
 
     const float g1 = get (b, "gain");
-    const float g2 = wasPair ? -g1 : (inverted && gainType ? -g1 : g1);
+    const bool mirrored = wasPair || (inverted && gainType);          // the copy gets the opposite gain (and the opposite Active gain)
+    const float g2 = mirrored ? -g1 : g1;
 
-    for (auto name : { "type", "freq", "q", "slp", "mute", "dyn", "dthr", "dknee", "datk", "drel", "dmix", "dauto", "dmode", "dratio", "dsc",
+    for (auto name : { "type", "freq", "q", "slp", "mute", "dyn", "dthr", "dwid", "dgain", "datk", "drel", "dmix", "dauto", "ddet", "dfol", "dfreq", "dq",
                        "lxs", "lxd", "lxr", "lxa", "lxm", "lys", "lyd", "lyr", "lya", "lym" })
         if (auto* src = proc.apvts.getParameter (EQ::id (b, name)))
             if (auto* dst = proc.apvts.getParameter (EQ::id (nb, name)))
                 dst->setValueNotifyingHost (src->getValue());
 
     setParam (EQ::id (nb, "gain"), g2);
+    if (mirrored) setParam (EQ::id (nb, "dgain"), -get (b, "dgain"));
     for (int band : { b, nb })
     {
         setParam (EQ::id (band, "split"), 0.0f);
@@ -1322,6 +1341,7 @@ void EQEditor::savePreset (const juce::String& name)
 
     juce::XmlElement xml ("DypelvPreset");
     xml.setAttribute ("name", name);
+    xml.setAttribute ("dynModel", 2);       // 0.2.0 dynamics (Rest / Active); older presets are converted when loaded
     for (auto* prm : proc.getParameters())
         if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (prm))
         {
@@ -1364,8 +1384,26 @@ void EQEditor::loadEntry (const PresetEntry& e)
     {
         if (! xml->hasTagName ("DypelvPreset") && ! xml->hasTagName ("PrismPreset")) return;   // old tag = presets made before the rename
         resetAllBands();
+        std::map<juce::String, float> v;
         for (auto* p : xml->getChildWithTagNameIterator ("P"))
-            setParam (p->getStringAttribute ("id"), (float) p->getDoubleAttribute ("v"));
+            v[p->getStringAttribute ("id")] = (float) p->getDoubleAttribute ("v");
+
+        if (! xml->hasAttribute ("dynModel"))      // saved before 0.2.0: Compress / Expand -> Rest / Active
+            for (int b = 0; b < EQ::numBands; ++b)
+            {
+                auto get = [&] (const char* n, float def) { const auto it = v.find (EQ::id (b, n)); return it != v.end() ? it->second : def; };
+                if (v.count (EQ::id (b, "dratio")) == 0 && v.count (EQ::id (b, "dmode")) == 0) continue;
+                if (get ("dyn", 0.0f) > 0.5f)
+                {
+                    const auto m = EQ::convertOldDyn (get ("gain", 0.0f), get ("dthr", -24.0f), get ("dmode", 0.0f) > 0.5f,
+                                                      get ("dratio", 4.0f), get ("dknee", 6.0f));
+                    v[EQ::id (b, "gain")] = m.rest;   v[EQ::id (b, "dgain")] = m.active;
+                    v[EQ::id (b, "dthr")] = m.thr;    v[EQ::id (b, "dwid")] = m.wid;
+                }
+                v[EQ::id (b, "ddet")] = get ("dsc", 0.0f) > 0.5f ? 2.0f : 0.0f;
+            }
+        for (const auto& kv : v)
+            setParam (kv.first, kv.second);
         setPresetName (e.name);
     }
     repaint();
@@ -1483,7 +1521,7 @@ bool EQEditor::rebuildCurves()
         s.split = EQ::hasGain (type) ? (int) std::lround (get (b, "split")) : 0;
         s.g2 = s.split > 0 ? effGain2 (b) : 0.0f;
         s.dyn = get (b, "dyn") > 0.5f && EQ::hasGain (type);
-        s.tg = s.dyn ? get (b, "gain") : 0.0f;
+        s.tg = s.dyn ? get (b, "dgain") : 0.0f;       // Active: where the band sits when the level is high
 
         if (! (s == sigs[(size_t) b])) sigChanged = true;
     }
@@ -1997,7 +2035,7 @@ void EQEditor::paint (juce::Graphics& g)
             g.setColour (col.withAlpha (sel ? 0.95f : 0.55f));
             g.strokePath (line, PathStrokeType (sel ? 1.5f : 1.1f, PathStrokeType::curved, PathStrokeType::rounded));
 
-            // dynamic band: dashed outline = where the band would sit at full effect; the solid line is the live response
+            // dynamic band: dashed outline = the Active state (the band's Gain is Rest); the solid line is the live response
             const auto& vT = targetCurve[(size_t) b];
             if (vT.size() == (size_t) curveCols) dashed (vT, col, sel ? 0.8f : 0.5f, 5.0f, 4.0f);
             // split band: dashed outline = the second side (Right / Side)
@@ -2149,11 +2187,12 @@ void EQEditor::paint (juce::Graphics& g)
             g.setColour (col.withAlpha (0.45f));
             g.drawLine (p.x, p.y, gp.x, gp.y, 1.0f);
             g.fillEllipse (Rectangle<float> (8.0f, 8.0f).withCentre (gp));
-            if (dynOn && side == 0 && std::abs (effGain (b) - get (b, "gain")) > 0.1f)   // live gain change from the compressor
+            const float dynShift = proc.effDyn[(size_t) b].load();
+            if (dynOn && side == 0 && std::abs (dynShift) > 0.1f)   // live gain change from the dynamics
             {
                 g.setFont (10.5f);
                 g.setColour (kText.withAlpha (0.85f));
-                const float d = effGain (b) - get (b, "gain");
+                const float d = dynShift;
                 g.drawText (String (d > 0 ? "+" : "") + String (d, 1), Rectangle<float> (gp.x + 6.0f, gp.y - 7.0f, 44.0f, 14.0f), Justification::centredLeft);
             }
         }

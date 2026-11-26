@@ -663,28 +663,24 @@ juce::AudioProcessorValueTreeState::ParameterLayout EQProcessor::createLayout()
     AudioProcessorValueTreeState::ParameterLayout layout;
 
     auto freqAttr = AudioParameterFloatAttributes()
-                        .withStringFromValueFunction ([] (float v, int) { return EQ::fmtFreq (v); })
-                        .withValueFromStringFunction ([] (const String& t)
-                        {
-                            auto s = t.trim().toLowerCase();
-                            float v = s.getFloatValue();
-                            return s.contains ("k") ? v * 1000.0f : v;
-                        });
+                        .withStringFromValueFunction ([] (float v, int) { return EQ::fmtFreqExact (v); })
+                        .withValueFromStringFunction ([] (const String& t) { return EQ::parseFreq (t); });
     auto gainAttr = AudioParameterFloatAttributes()
-                        .withStringFromValueFunction ([] (float v, int) { return String (v > 0 ? "+" : "") + String (v, 1) + " dB"; });
+                        .withStringFromValueFunction ([] (float v, int) { return String (v > 0 ? "+" : "") + String (v, 2) + " dB"; })
+                        .withValueFromStringFunction ([] (const String& t) { return EQ::parseNumber (t); });
     auto slopeAttr = AudioParameterFloatAttributes()
                          .withStringFromValueFunction ([] (float v, int) { return EQ::fmtSlope (v); })
                          .withValueFromStringFunction ([] (const String& t) { return t.getFloatValue(); });
     auto qAttr = AudioParameterFloatAttributes()
-                     .withStringFromValueFunction ([] (float v, int) { return String (v, 2); });
+                     .withStringFromValueFunction ([] (float v, int) { return String (v, 2); })
+                     .withValueFromStringFunction ([] (const String& t) { return EQ::parseNumber (t); });
     auto dbAttr = AudioParameterFloatAttributes()
-                      .withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " dB"; });
+                      .withStringFromValueFunction ([] (float v, int) { return String (v, 2) + " dB"; })
+                      .withValueFromStringFunction ([] (const String& t) { return EQ::parseNumber (t); });
     auto msAttr = AudioParameterFloatAttributes()
                       .withStringFromValueFunction ([] (float v, int) { return v >= 100.0f ? String ((int) std::lround (v)) + " ms" : String (v, 1) + " ms"; });
     auto pctAttr = AudioParameterFloatAttributes()
                        .withStringFromValueFunction ([] (float v, int) { return String ((int) std::lround (v)) + " %"; });
-    auto ratioAttr = AudioParameterFloatAttributes()
-                         .withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " : 1"; });
     auto hzAttr = AudioParameterFloatAttributes()
                       .withStringFromValueFunction ([] (float v, int) { return String (v, 2) + " Hz"; });
     auto octAttr = AudioParameterFloatAttributes()
@@ -698,6 +694,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout EQProcessor::createLayout()
     {
         const auto n = "Band " + String (b + 1) + " ";
         auto pid = [&] (const char* name) { return ParameterID { EQ::id (b, name), 1 }; };
+        auto pid2 = [&] (const char* name) { return ParameterID { EQ::id (b, name), 2 }; };    // added in 0.2.0
 
         NormalisableRange<float> fr (20.0f, 20000.0f, 0.0f);
         fr.setSkewForCentre (1000.0f);
@@ -706,13 +703,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout EQProcessor::createLayout()
         NormalisableRange<float> atk (0.1f, 500.0f, 0.0f);   atk.setSkewForCentre (20.0f);
         NormalisableRange<float> rel (1.0f, 2000.0f, 0.0f);  rel.setSkewForCentre (150.0f);
         NormalisableRange<float> rate (0.02f, 20.0f, 0.0f);  rate.setSkewForCentre (1.0f);
-        NormalisableRange<float> ratioR (1.0f, 20.0f, 0.0f); ratioR.setSkewForCentre (4.0f);
+        NormalisableRange<float> detF (20.0f, 20000.0f, 0.0f);  detF.setSkewForCentre (1000.0f);
+        NormalisableRange<float> detQ (0.1f, 10.0f, 0.0f);      detQ.setSkewForCentre (1.0f);
 
         layout.add (std::make_unique<AudioParameterBool> (pid ("on"), n + "On", false));
         layout.add (std::make_unique<AudioParameterChoice> (pid ("type"), n + "Type", EQ::typeNames(), (int) EQ::Peak));
         layout.add (std::make_unique<AudioParameterChoice> (pid ("ch"), n + "Channel", EQ::channelNames(), 0));
         layout.add (std::make_unique<AudioParameterFloat> (pid ("freq"), n + "Freq", fr, 1000.0f, freqAttr));
-        layout.add (std::make_unique<AudioParameterFloat> (pid ("gain"), n + "Gain", NormalisableRange<float> (-30.0f, 30.0f, 0.01f), 0.0f, gainAttr));
+        layout.add (std::make_unique<AudioParameterFloat> (pid ("gain"), n + "Gain", NormalisableRange<float> (-30.0f, 30.0f, 0.001f), 0.0f, gainAttr));
         layout.add (std::make_unique<AudioParameterFloat> (pid ("q"), n + "Q", qr, 1.0f, qAttr));
         layout.add (std::make_unique<AudioParameterFloat> (pid ("slp"), n + "Slope", EQ::slopeRange<float> (3.0), 12.0f, slopeAttr));
         layout.add (std::make_unique<AudioParameterBool> (pid ("solo"), n + "Solo", false));
@@ -723,15 +721,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout EQProcessor::createLayout()
 
         // dynamics
         layout.add (std::make_unique<AudioParameterBool> (pid ("dyn"), n + "Dynamic", false));
-        layout.add (std::make_unique<AudioParameterFloat> (pid ("dthr"), n + "Dyn Threshold", NormalisableRange<float> (-60.0f, 0.0f, 0.1f), -24.0f, dbAttr));
-        layout.add (std::make_unique<AudioParameterFloat> (pid ("dknee"), n + "Dyn Knee", NormalisableRange<float> (0.0f, 24.0f, 0.1f), 6.0f, dbAttr));
+        // Dynamics: the band lives between two gains. Rest (the band's Gain) when the detector is quiet, Active when it is loud;
+        // the level moves the gain from one to the other around the Threshold over a transition Width.
+        layout.add (std::make_unique<AudioParameterFloat> (pid ("dthr"), n + "Dyn Threshold", NormalisableRange<float> (-60.0f, 0.0f, 0.01f), -24.0f, dbAttr));
+        layout.add (std::make_unique<AudioParameterFloat> (pid2 ("dwid"), n + "Dyn Width", NormalisableRange<float> (0.1f, 40.0f, 0.01f), 6.0f, dbAttr));
+        layout.add (std::make_unique<AudioParameterFloat> (pid2 ("dgain"), n + "Dyn Active Gain", NormalisableRange<float> (-30.0f, 30.0f, 0.001f), -3.0f, gainAttr));
         layout.add (std::make_unique<AudioParameterFloat> (pid ("datk"), n + "Dyn Attack", atk, 10.0f, msAttr));
         layout.add (std::make_unique<AudioParameterFloat> (pid ("drel"), n + "Dyn Release", rel, 120.0f, msAttr));
         layout.add (std::make_unique<AudioParameterFloat> (pid ("dmix"), n + "Dyn Mix", NormalisableRange<float> (0.0f, 100.0f, 1.0f), 100.0f, pctAttr));
         layout.add (std::make_unique<AudioParameterBool> (pid ("dauto"), n + "Dyn Auto", false, fixedBool));
-        layout.add (std::make_unique<AudioParameterChoice> (pid ("dmode"), n + "Dyn Mode", EQ::dynModeNames(), 0, fixedChoice));
-        layout.add (std::make_unique<AudioParameterFloat> (pid ("dratio"), n + "Dyn Ratio", ratioR, 4.0f, ratioAttr));
-        layout.add (std::make_unique<AudioParameterBool> (pid ("dsc"), n + "Dyn Sidechain", false, fixedBool));
+        layout.add (std::make_unique<AudioParameterChoice> (pid2 ("ddet"), n + "Dyn Detector", EQ::detectorNames(), 0, fixedChoice));
+        layout.add (std::make_unique<AudioParameterBool> (pid2 ("dfol"), n + "Dyn Follow Band", true, fixedBool));
+        layout.add (std::make_unique<AudioParameterFloat> (pid2 ("dfreq"), n + "Dyn Detector Freq", detF, 1000.0f, freqAttr));
+        layout.add (std::make_unique<AudioParameterFloat> (pid2 ("dq"), n + "Dyn Detector Q", detQ, 1.0f, qAttr));
 
         // two independent LFOs: X modulates frequency, Y modulates gain (or Q on bands without gain). Shape "Off" disables one.
         layout.add (std::make_unique<AudioParameterChoice> (pid ("lxs"), n + "LFO X Shape", EQ::lfoShapeNames(), 0, fixedChoice));
@@ -785,10 +787,11 @@ EQProcessor::EQProcessor()
         auto g = [&] (const char* name) { return apvts.getRawParameterValue (EQ::id (b, name)); };
         q.on = g ("on");     q.type = g ("type"); q.ch = g ("ch");     q.freq = g ("freq"); q.gain = g ("gain");
         q.q = g ("q");       q.slope = g ("slp"); q.solo = g ("solo"); q.mute = g ("mute");
-        q.dyn = g ("dyn");   q.dthr = g ("dthr"); q.dknee = g ("dknee"); q.datk = g ("datk"); q.drel = g ("drel");
+        q.dyn = g ("dyn");   q.dthr = g ("dthr"); q.datk = g ("datk"); q.drel = g ("drel");
         q.dmix = g ("dmix"); q.dauto = g ("dauto");
         q.split = g ("split");
-        q.dmode = g ("dmode"); q.dratio = g ("dratio"); q.dsc = g ("dsc"); q.lxd = g ("lxd"); q.lyd = g ("lyd");
+        q.dgain = g ("dgain"); q.dwid = g ("dwid"); q.ddet = g ("ddet"); q.dfol = g ("dfol"); q.dfreq = g ("dfreq"); q.dq = g ("dq");
+        q.lxd = g ("lxd"); q.lyd = g ("lyd");
         q.lxs = g ("lxs");   q.lxr = g ("lxr");   q.lxa = g ("lxa");   q.lxm = g ("lxm");
         q.lys = g ("lys");   q.lyr = g ("lyr");   q.lya = g ("lya");   q.lym = g ("lym");
         effF[(size_t) b].store (q.freq->load());
@@ -974,12 +977,14 @@ void EQProcessor::runBand (int b, float* L, float* R, int n)
 
     const float rateX = q.lxr->load(), rateY = q.lyr->load(), amtX = q.lxa->load(), amtY = q.lya->load();
     const float smX = q.lxm->load() * 0.01f, smY = q.lym->load() * 0.01f;
-    const float thr = q.dthr->load(), knee = q.dknee->load();
+    const float thr = q.dthr->load(), wid = juce::jmax (0.1f, q.dwid->load());
+    const float actShift = q.dgain->load() - baseG;     // Active minus Rest: how far the dynamics can move the gain
     const float mix = q.dmix->load() * 0.01f;
     const bool autoThr = q.dauto->load() > 0.5f;
-    const int dmode = (int) std::lround (q.dmode->load());
-    const float dslope = 1.0f - 1.0f / juce::jmax (1.0f, q.dratio->load());   // dB of gain change per dB past the threshold
-    const bool useSC = dyn && q.dsc->load() > 0.5f && scL != nullptr;
+    const int detMode = (int) std::lround (q.ddet->load());          // 0 Band, 1 Full, 2 Sidechain
+    const bool follow = q.dfol->load() > 0.5f;
+    const float detFreqP = q.dfreq->load(), detQP = q.dq->load();
+    const bool useSC = dyn && detMode == 2 && scL != nullptr;
     const float atkS = std::max (0.0001f, q.datk->load() * 0.001f), relS = std::max (0.001f, q.drel->load() * 0.001f);
 
     // one LFO step: free-running in Hz, or locked to the host tempo / beat position
@@ -1000,7 +1005,7 @@ void EQProcessor::runBand (int b, float* L, float* R, int n)
     float* m = mBuf.data();
     float* s = sBuf.data();
     float fEff = baseF, gEff = baseG, gB = baseG, qEff = baseQ;
-    float lastLv = -120.0f, lastThr = thr;
+    float lastLv = -120.0f, lastThr = thr, lastDyn = 0.0f;
 
     for (int off = 0; off < n; off += chunk)
     {
@@ -1033,24 +1038,21 @@ void EQProcessor::runBand (int b, float* L, float* R, int n)
             rt.avgDb += (lv - rt.avgDb) * (1.0f - std::exp (-(float) len / (1.5f * (float) sampleRate)));
             lastLv = lv;
             lastThr = autoThr ? rt.avgDb + 5.0f : thr;
-            const float ex = lv - lastThr;
-            const float xin = dmode == 0 ? ex : -ex;     // Compress: acts above the threshold. Expand: acts below it
-            float x;
-            if (knee < 0.01f)             x = juce::jmax (0.0f, xin);
-            else if (xin < -knee * 0.5f)  x = 0.0f;
-            else if (xin > knee * 0.5f)   x = xin;
-            else                          x = (xin + knee * 0.5f) * (xin + knee * 0.5f) / (2.0f * knee);
-            const float amt = juce::jmin (x * dslope, std::abs (gLfo));   // the band's Gain is the full-effect amount
-            gEff = gLfo >= 0.0f ? amt : -amt;
+            // Rest -> Active: a smooth step centred on the threshold, Width dB across
+            const float t = juce::jlimit (0.0f, 1.0f, (lv - (lastThr - wid * 0.5f)) / wid);
+            lastDyn = actShift * (t * t * (3.0f - 2.0f * t));
+            gEff = gLfo + lastDyn;
 
-            if (fEff != rt.detF || baseQ != rt.detQ || type != rt.detType)
+            const float dF = follow ? fEff : juce::jlimit (20.0f, 20000.0f, detFreqP);
+            const float dQ = follow ? baseQ : detQP;
+            if (dF != rt.detF || dQ != rt.detQ || type != rt.detType)
             {
-                rt.detF = fEff; rt.detQ = baseQ; rt.detType = type;
+                rt.detF = dF; rt.detQ = dQ; rt.detType = type;
                 EQ::BQ d;
-                if (type == EQ::LowShelf)       d = EQ::lowPassBQ (sampleRate, fEff, 0.7071f);
-                else if (type == EQ::HighShelf) d = EQ::highPassBQ (sampleRate, fEff, 0.7071f);
-                else if (type == EQ::Peak)      d = EQ::bandPassBQ (sampleRate, fEff, juce::jmax (0.3f, baseQ));
-                else                            d = EQ::bandPassBQ (sampleRate, fEff, 0.5f);
+                if (type == EQ::LowShelf)       d = EQ::lowPassBQ (sampleRate, dF, 0.7071f);
+                else if (type == EQ::HighShelf) d = EQ::highPassBQ (sampleRate, dF, 0.7071f);
+                else if (type == EQ::Peak)      d = EQ::bandPassBQ (sampleRate, dF, juce::jmax (0.3f, dQ));
+                else                            d = EQ::bandPassBQ (sampleRate, dF, 0.5f);
                 rt.det[0].set (d); rt.det[1].set (d);
             }
         }
@@ -1146,10 +1148,10 @@ void EQProcessor::runBand (int b, float* L, float* R, int n)
                 const float* d1 = useSC ? (scR != nullptr ? scR + off : nullptr) : w1;
                 float pk = 0.0f;
                 for (int i = 0; i < len; ++i)
-                    pk = juce::jmax (pk, (float) std::abs (rt.det[p0].tick ((double) d0[i])));
+                    pk = juce::jmax (pk, detMode == 1 ? std::abs (d0[i]) : (float) std::abs (rt.det[p0].tick ((double) d0[i])));
                 if (d1 != nullptr)
                     for (int i = 0; i < len; ++i)
-                        pk = juce::jmax (pk, (float) std::abs (rt.det[1].tick ((double) d1[i])));
+                        pk = juce::jmax (pk, detMode == 1 ? std::abs (d1[i]) : (float) std::abs (rt.det[1].tick ((double) d1[i])));
                 const float cf = std::exp (-(float) len / ((pk > rt.env ? atkS : relS) * (float) sampleRate));
                 rt.env = cf * rt.env + (1.0f - cf) * pk;
                 if (doMix)
@@ -1163,6 +1165,22 @@ void EQProcessor::runBand (int b, float* L, float* R, int n)
             {
                 rt.flt[p0][(size_t) i].process (w0, len);
                 if (w1 != nullptr) rt.flt[1][(size_t) i].process (w1, len);
+            }
+
+            // Safety net. A resonant filter whose frequency jumps (LFO Square / Saw on a narrow high pass, say) can pump itself up
+            // chunk after chunk. Anything past +60 dBFS (or not a number) is a fault, not music: clear the band and let it start again.
+            {
+                bool fault = false;
+                for (int i = 0; i < len; ++i) fault |= ! (std::abs (w0[i]) < 1000.0f);
+                if (w1 != nullptr)
+                    for (int i = 0; i < len; ++i) fault |= ! (std::abs (w1[i]) < 1000.0f);
+                if (fault)
+                {
+                    for (auto& chain : rt.flt)
+                        for (auto& f : chain) f.reset();
+                    std::fill (w0, w0 + len, 0.0f);
+                    if (w1 != nullptr) std::fill (w1, w1 + len, 0.0f);
+                }
             }
 
             if (doMix)
@@ -1189,6 +1207,7 @@ void EQProcessor::runBand (int b, float* L, float* R, int n)
     effG2[(size_t) b].store (gB);
     effLevel[(size_t) b].store (lastLv);
     effThr[(size_t) b].store (lastThr);
+    effDyn[(size_t) b].store (lastDyn);
     lfoPhX[(size_t) b].store ((float) rt.phX);
     lfoPhY[(size_t) b].store ((float) rt.phY);
 }
@@ -1471,6 +1490,50 @@ void EQProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuff
 
 juce::AudioProcessorEditor* EQProcessor::createEditor() { return new EQEditor (*this); }
 
+
+// Projects saved before 0.2.0 had Compress/Expand with Ratio and Knee. Translate each dynamic band to Rest / Active / Width:
+//   Compress (acts above the threshold):  Rest = 0, Active = old Gain, the change runs from the threshold up to the level where the ratio has used up the Gain
+//   Expand   (acts below the threshold):  Rest = old Gain, Active = 0, the same run downwards
+// The transition is centred on a new threshold (EQ::convertOldDyn); Sidechain becomes a detector choice.
+static void migrateDynamics (juce::ValueTree& st)
+{
+    if (! st.isValid() || st.getProperty ("dynModel").toString().isNotEmpty()) return;
+    auto find = [&] (const juce::String& id) -> juce::ValueTree
+    {
+        for (int i = 0; i < st.getNumChildren(); ++i)
+        {
+            auto c = st.getChild (i);
+            if (c.getProperty ("id").toString() == id) return c;
+        }
+        return {};
+    };
+    auto get = [&] (int b, const char* n, float def)
+    {
+        auto c = find (EQ::id (b, n));
+        return c.isValid() ? (float) (double) c.getProperty ("value", (double) def) : def;
+    };
+    auto set = [&] (int b, const char* n, float v)
+    {
+        const auto id = EQ::id (b, n);
+        auto c = find (id);
+        if (! c.isValid()) { c = juce::ValueTree ("PARAM"); c.setProperty ("id", id, nullptr); st.appendChild (c, nullptr); }
+        c.setProperty ("value", (double) v, nullptr);
+    };
+    for (int b = 0; b < EQ::numBands; ++b)
+    {
+        const bool hadOld = find (EQ::id (b, "dratio")).isValid() || find (EQ::id (b, "dmode")).isValid() || find (EQ::id (b, "dknee")).isValid();
+        if (! hadOld) continue;
+        if (get (b, "dyn", 0.0f) > 0.5f)
+        {
+            const auto m = EQ::convertOldDyn (get (b, "gain", 0.0f), get (b, "dthr", -24.0f), get (b, "dmode", 0.0f) > 0.5f,
+                                              get (b, "dratio", 4.0f), get (b, "dknee", 6.0f));
+            set (b, "gain", m.rest);  set (b, "dgain", m.active);  set (b, "dthr", m.thr);  set (b, "dwid", m.wid);
+        }
+        set (b, "ddet", get (b, "dsc", 0.0f) > 0.5f ? 2.0f : 0.0f);
+    }
+    st.setProperty ("dynModel", 2, nullptr);
+}
+
 void EQProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     auto state = apvts.copyState();
@@ -1485,6 +1548,7 @@ void EQProcessor::getStateInformation (juce::MemoryBlock& dest)
         m.setProperty ("id", allParams[(size_t) pi]->paramID, nullptr);
         map.appendChild (m, nullptr);
     }
+    state.setProperty ("dynModel", 2, nullptr);
     auto ui = state.getOrCreateChildWithName ("UI", nullptr);
     ui.setProperty ("cardDX", cardDX.load(), nullptr);
     ui.setProperty ("cardDY", cardDY.load(), nullptr);
@@ -1498,7 +1562,9 @@ void EQProcessor::setStateInformation (const void* data, int size)
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
         {
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            auto loaded = juce::ValueTree::fromXml (*xml);
+            migrateDynamics (loaded);
+            apvts.replaceState (loaded);
 
             const auto ui = apvts.state.getChildWithName ("UI");
             if (ui.isValid() && ui.hasProperty ("cardDX") && (double) ui["cardDX"] >= 0.0)

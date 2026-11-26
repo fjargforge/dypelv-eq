@@ -76,6 +76,7 @@ private:
     bool animated (int band) const;         // LFO or dynamics active
     float effFreq (int band) const;
     float effGain (int band) const;
+    bool dynOnly (int band) const;
     float effQ (int band) const;
     float effGain2 (int band) const;
     int hitBand (juce::Point<float>, int* side = nullptr) const;      // side: 1 = the mirror dot of a pair

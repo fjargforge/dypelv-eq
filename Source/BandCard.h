@@ -179,19 +179,12 @@ inline float lfoShape (int shape, float x, float smooth = 1.0f)
     }
 }
 
-// same curve as the audio engine: band gain (dB) as a function of detector level
-inline float dynGain (float level, float thr, float knee, float ratio, float gain, int mode)
+// same curve as the audio engine: band gain (dB) as a function of the detector level.
+// Rest while quiet, Active while loud, a smooth step between them: Width dB wide, centred on the threshold.
+inline float dynGain (float level, float thr, float wid, float rest, float active)
 {
-    const float ex = level - thr;
-    const float xin = mode == 0 ? ex : -ex;
-    float x;
-    if (knee < 0.01f)             x = juce::jmax (0.0f, xin);
-    else if (xin < -knee * 0.5f)  x = 0.0f;
-    else if (xin > knee * 0.5f)   x = xin;
-    else                          x = (xin + knee * 0.5f) * (xin + knee * 0.5f) / (2.0f * knee);
-    const float slope = 1.0f - 1.0f / juce::jmax (1.0f, ratio);
-    const float amt = juce::jmin (x * slope, std::abs (gain));
-    return gain >= 0.0f ? amt : -amt;
+    const float t = juce::jlimit (0.0f, 1.0f, (level - (thr - wid * 0.5f)) / juce::jmax (0.1f, wid));
+    return rest + (active - rest) * (t * t * (3.0f - 2.0f * t));
 }
 
 // ---- small icon button (optionally a toggle)
@@ -332,7 +325,12 @@ public:
 
         if (! editor.isVisible())
         {
-            const auto nf = monoFont (inlineMode ? 15.0f : 19.0f);
+            // long exact numbers ("-12.345 dB", "12.346 kHz") shrink a little instead of being cut off
+            float size = inlineMode ? 15.0f : 19.0f;
+            auto nf = monoFont (size);
+            const float unitW = unit.isNotEmpty() ? textWidth (uiFont (11.0f), unit) + 4.0f : 0.0f;
+            while (size > 12.0f && textWidth (nf, num) + unitW > r.getWidth())
+                nf = monoFont (size -= 1.0f);
             const auto va = r.withTrimmedBottom (inlineMode ? 2.0f : 4.0f);
             g.setColour ((lit ? col : kText).withAlpha (a));
             g.setFont (nf);
@@ -396,7 +394,8 @@ public:
     void mouseDoubleClick (const juce::MouseEvent&) override
     {
         if (! isEnabled() || onClick) return;
-        editor.setText (getTextFromValue (getValue()), false);
+        editStart = getTextFromValue (getValue());
+        editor.setText (editStart, false);
         editor.setVisible (true);
         editor.grabKeyboardFocus();
         editor.selectAll();
@@ -410,13 +409,15 @@ private:
     {
         const auto t = editor.getText();
         editor.setVisible (false);
-        if (t.isNotEmpty()) setValue (getValueFromText (t), juce::sendNotificationSync);
+        if (t.isNotEmpty() && t != editStart)       // Enter on an untouched text keeps the exact stored value (the field shows it rounded)
+            setValue (getValueFromText (t), juce::sendNotificationSync);
         repaint();
     }
 
     juce::String caption;
     juce::Colour col { kAccent };
     juce::TextEditor editor;
+    juce::String editStart;
     bool inlineMode = false;
 };
 
@@ -659,7 +660,8 @@ public:
 
     explicit BandCard (EQProcessor& p) : proc (p),
         freqBar ("Frequency"), gainBar ("Gain"), qBar ("Q"),
-        thrBar ("Threshold"), kneeBar ("Knee"), ratioBar ("Ratio"), atkBar ("Attack"), relBar ("Release"), mixBar ("Wet / dry"),
+        thrBar ("Threshold"), widBar ("Width"), restBar ("Rest"), actBar ("Active"), dFreqBar ("Detector freq"), dQBar ("Detector Q"),
+        atkBar ("Attack"), relBar ("Release"), mixBar ("Wet / dry"),
         xRateBar ("Rate"), xAmtBar ("Amount"), yRateBar ("Rate"), yAmtBar ("Amount"), xSmBar ("Smooth"), ySmBar ("Smooth"),
         slopeBar ("Slope")
     {
@@ -704,10 +706,22 @@ public:
 
         xSyncFld.addItemList (EQ::syncNames(), 1);
         ySyncFld.addItemList (EQ::syncNames(), 1);
-        scBtn.setTooltip ("Sidechain: detect the level from the sidechain input instead of the band itself");
+        dynBtn.setTooltip ("Dynamic: the level moves the band's gain from Rest (quiet) to Active (loud)");
         autoBtn.setTooltip ("Auto: the threshold follows the average level");
-        dynBtn.setTooltip ("Dynamic: the band's gain follows the level");
-        dModeFld.setTooltip ("Above: acts when the band is louder than the threshold (compress). Below: acts when it is quieter (expand). Click to switch");
+        followBtn.onClick = [this]
+        {
+            // switching Follow off: the detector starts where the band is, instead of jumping to its own stored frequency
+            if (! followBtn.getToggleState() && band >= 0)
+            {
+                gcSetParam ("dfreq", val ("freq"));
+                gcSetParam ("dq", juce::jlimit (0.1f, 10.0f, val ("q")));
+            }
+        };
+        followBtn.setTooltip ("Follow: the detector filter moves and narrows with the band. Off: it has its own frequency and Q");
+        detFld.setTooltip ("Detector. Band: listens to the band's own range. Full: the whole signal. Sidechain: the sidechain input. Click to switch");
+        restBar.setTooltip ("Rest: the band's gain while the signal is quiet (same as Gain on the EQ tab)");
+        actBar.setTooltip ("Active: the band's gain while the signal is loud");
+        widBar.setTooltip ("Width: how many dB the level needs to travel from Rest to Active");
 
         for (auto* c : bodyComps())
             addChildComponent (*c);
@@ -745,9 +759,10 @@ public:
                 if (id > 0 && sp != nullptr) sp->setValue ((double) EQ::slopeSteps[id - 1], juce::sendNotificationSync);
             });
         };
-        ba ("dyn", dynBtn);  ba ("dauto", autoBtn);  ba ("dsc", scBtn);  ca ("dmode", dModeFld.box);
-        sa ("dthr", thrBar);  sa ("dknee", kneeBar);  sa ("dratio", ratioBar);  sa ("datk", atkBar);
-        sa ("drel", relBar);  sa ("dmix", mixBar);
+        ba ("dyn", dynBtn);  ba ("dauto", autoBtn);  ba ("dfol", followBtn);  ca ("ddet", detFld.box);
+        sa ("dthr", thrBar);  sa ("dwid", widBar);  sa ("gain", restBar);  sa ("dgain", actBar);
+        sa ("dfreq", dFreqBar);  sa ("dq", dQBar);
+        sa ("datk", atkBar);  sa ("drel", relBar);  sa ("dmix", mixBar);
         ca ("lxs", xShapeRow.box);  ca ("lxd", xSyncFld);  sa ("lxr", xRateBar);  sa ("lxa", xAmtBar);  sa ("lxm", xSmBar);
         ca ("lys", yShapeRow.box);  ca ("lyd", ySyncFld);  sa ("lyr", yRateBar);  sa ("lya", yAmtBar);  sa ("lym", ySmBar);
 
@@ -757,7 +772,8 @@ public:
             f.onContext = [this, pid] { if (onParamMenu) onParamMenu (pid); };
         };
         ctx (freqBar, "freq");  ctx (gainBar, "gain");  ctx (qBar, "q");  ctx (slopeBar, "slp");
-        ctx (thrBar, "dthr");   ctx (kneeBar, "dknee"); ctx (ratioBar, "dratio");
+        ctx (thrBar, "dthr");   ctx (widBar, "dwid");   ctx (restBar, "gain");  ctx (actBar, "dgain");
+        ctx (dFreqBar, "dfreq"); ctx (dQBar, "dq");
         ctx (atkBar, "datk");   ctx (relBar, "drel");   ctx (mixBar, "dmix");
         ctx (xRateBar, "lxr");  ctx (xAmtBar, "lxa");   ctx (xSmBar, "lxm");
         ctx (yRateBar, "lyr");  ctx (yAmtBar, "lya");   ctx (ySmBar, "lym");
@@ -768,9 +784,9 @@ public:
             f->setBandColour (c);
         for (auto* sg : { &xShapeRow, &yShapeRow })
             sg->setBandColour (c);
-        for (auto* t : { &dynBtn, &autoBtn, &scBtn })
+        for (auto* t : { &dynBtn, &autoBtn, &followBtn })
             t->setBandColour (c);
-        dModeFld.setBandColour (c);
+        detFld.setBandColour (c);
 
         sig = -1;
         toFront (false);       // the editor decides whether the card is shown (double-click on a band)
@@ -790,14 +806,17 @@ public:
         const bool xRnd = (int) std::lround (val ("lxs")) == EQ::LfoRandom, yRnd = (int) std::lround (val ("lys")) == EQ::LfoRandom;
         const int split = vGain ? (int) std::lround (val ("split")) : 0;
         const bool onePole = EQ::hasSlope (type) && val ("slp") < 6.05f;     // 6 dB/oct and below is a single pole or less: no resonance to control
+        const int det = juce::jlimit (0, 2, (int) std::lround (val ("ddet")));             // 0 Band, 1 Full, 2 Sidechain
+        const bool follow = val ("dfol") > 0.5f;
 
         const int s = tab | (type << 2) | (dynOn ? 1 << 6 : 0) | (autoOn ? 1 << 7 : 0) | (xs ? 1 << 8 : 0) | (ys ? 1 << 9 : 0)
                       | (xOn ? 1 << 10 : 0) | (yOn ? 1 << 11 : 0) | (split << 12) | (band << 16) | (xRnd ? 1 << 24 : 0) | (yRnd ? 1 << 25 : 0)
-                      | (onePole ? 1 << 26 : 0);
+                      | (onePole ? 1 << 26 : 0) | (follow ? 1 << 27 : 0) | (det << 28);
         if (s != sig)
         {
             sig = s;
             gainBar.setCaption (split == 1 ? "Gain  L" : split == 2 ? "Gain  M" : "Gain");
+            restBar.setCaption (split == 1 ? "Rest  L" : split == 2 ? "Rest  M" : "Rest");
             // the cut filters start at 3 dB/oct; the bell starts at its ordinary shape, 12 dB/oct
             const double slopeMin = type == EQ::Peak ? 12.0 : 3.0;
             if (slopeBar.getMinimum() != slopeMin)
@@ -808,11 +827,12 @@ public:
 
             qBar.setEnabled (! onePole);
             thrBar.setEnabled (dynOn && ! autoOn);
-            for (auto* v : { &kneeBar, &ratioBar, &atkBar, &relBar, &mixBar })
+            for (auto* v : { &widBar, &restBar, &actBar, &atkBar, &relBar, &mixBar, &dFreqBar, &dQBar })
                 v->setEnabled (dynOn);
-            dModeFld.setEnabled (dynOn);
+            detFld.setEnabled (dynOn);
             autoBtn.setEnabled (dynOn);
-            scBtn.setEnabled (dynOn);
+            followBtn.setEnabled (dynOn && det == 0);       // Full and Sidechain listen to an unfiltered signal: nothing to follow
+            dQBar.setEnabled (dynOn && type == EQ::Peak);   // shelves use a fixed detector slope, only the bell has a detector Q
             xRateBar.setEnabled (xOn && ! xs);  xAmtBar.setEnabled (xOn);  xSmBar.setEnabled (xOn);  xSyncFld.setEnabled (xOn);
             yRateBar.setEnabled (yOn && ! ys);  yAmtBar.setEnabled (yOn);  ySmBar.setEnabled (yOn);  ySyncFld.setEnabled (yOn);
             relayout();
@@ -820,6 +840,12 @@ public:
 
         soloBtn.setToggleState (val ("solo") > 0.5f, juce::dontSendNotification);
         muteBtn.setToggleState (val ("mute") > 0.5f, juce::dontSendNotification);
+
+        if (tab == 1 && gcRect.getWidth() > 0)       // the curve follows the fields, the automation and the host even without audio
+        {
+            const std::array<float, 5> now { val ("gain"), val ("dgain"), val ("dthr"), val ("dwid"), dynOn ? 1.0f : 0.0f };
+            if (now != gcLast) { gcLast = now; repaint (gcRect.expanded (2)); }
+        }
 
         if (live || liveWas)
         {
@@ -900,17 +926,39 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        dragging = false;
+        if (gcActiveNow() && ! e.mods.isPopupMenu() && gcRect.contains (e.getPosition()))
+        {
+            gcMouseDown (e);                       // a handle of the Rest -> Active curve
+            if (gcDrag != gcNone) return;
+        }
         dragging = e.y < headerH;
         if (dragging) dragger.startDraggingComponent (this, e);
     }
     void mouseDrag (const juce::MouseEvent& e) override
     {
+        if (gcDrag != gcNone) { gcMouseDrag (e); return; }
         if (! dragging) return;
         dragger.dragComponent (this, e, nullptr);
         keepInside();
     }
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        const auto h = gcActiveNow() && gcRect.contains (e.getPosition()) ? gcHit (e.position) : gcNone;
+        if (h != gcHover)
+        {
+            gcHover = h;
+            setMouseCursor (h == gcNone ? juce::MouseCursor::NormalCursor : juce::MouseCursor::PointingHandCursor);
+            repaint (gcRect.expanded (2));
+        }
+    }
+    void mouseExit (const juce::MouseEvent&) override
+    {
+        if (gcHover != gcNone) { gcHover = gcNone; setMouseCursor (juce::MouseCursor::NormalCursor); repaint (gcRect.expanded (2)); }
+    }
     void mouseUp (const juce::MouseEvent& e) override
     {
+        if (gcDrag != gcNone) { gcMouseUp(); return; }
         if (dragging && e.mouseWasDraggedSinceMouseDown())
         {
             if (onMoved) onMoved();
@@ -933,15 +981,15 @@ private:
 
     std::vector<ValueField*> bars()
     {
-        return { &freqBar, &gainBar, &qBar, &thrBar, &kneeBar, &ratioBar, &atkBar, &relBar, &mixBar,
+        return { &freqBar, &gainBar, &qBar, &thrBar, &widBar, &restBar, &actBar, &dFreqBar, &dQBar, &atkBar, &relBar, &mixBar,
                  &xRateBar, &xAmtBar, &yRateBar, &yAmtBar, &xSmBar, &ySmBar, &slopeBar };
     }
     std::vector<juce::Component*> bodyComps()
     {
         std::vector<juce::Component*> v;
         for (auto* b : bars()) v.push_back (b);
-        for (auto* c : std::initializer_list<juce::Component*> { &dModeFld, &xShapeRow, &xSyncFld, &yShapeRow, &ySyncFld,
-                                                                  &dynBtn, &autoBtn, &scBtn })
+        for (auto* c : std::initializer_list<juce::Component*> { &detFld, &xShapeRow, &xSyncFld, &yShapeRow, &ySyncFld,
+                                                                  &dynBtn, &autoBtn, &followBtn })
             v.push_back (c);
         return v;
     }
@@ -1003,21 +1051,29 @@ private:
             }
             else
             {
-                const int g4 = 10, c4 = (fw - 3 * g4) / 4;      // Dynamic | Mode | Auto | Sidechain
-                put (dynBtn,   { pad + 0 * (c4 + g4), y, c4, fieldH });
-                put (dModeFld, { pad + 1 * (c4 + g4), y, c4, fieldH });
-                put (autoBtn,  { pad + 2 * (c4 + g4), y, c4, fieldH });
-                put (scBtn,    { pad + 3 * (c4 + g4), y, c4, fieldH });
+                // Dynamic | Detector | Auto | Follow  (Detector is wider: "Sidechain")
+                const int g4 = 8, wd = 98, wn = (fw - wd - 3 * g4) / 3;
+                put (dynBtn,    { pad,                              y, wn, fieldH });
+                put (detFld,    { pad + wn + g4,                    y, wd, fieldH });
+                put (autoBtn,   { pad + wn + g4 + wd + g4,          y, wn, fieldH });
+                put (followBtn, { pad + wn + g4 + wd + g4 + wn + g4, y, wn, fieldH });
                 y += fieldH + 10;
-                gcRect = { pad, y, fw, 78 };
-                y += 78 + 12;
-                put (thrBar,   { col3 (0), y, c3, fieldH });
-                put (kneeBar,  { col3 (1), y, c3, fieldH });
-                put (ratioBar, { col3 (2), y, c3, fieldH });
+                gcRect = { pad, y, fw, 92 };
+                y += 92 + 12;
+                put (restBar, { col3 (0), y, c3, fieldH });
+                put (actBar,  { col3 (1), y, c3, fieldH });
+                put (thrBar,  { col3 (2), y, c3, fieldH });
                 y += fieldH + 8;
-                put (atkBar, { col3 (0), y, c3, fieldH });
-                put (relBar, { col3 (1), y, c3, fieldH });
-                put (mixBar, { col3 (2), y, c3, fieldH });
+                put (widBar, { col3 (0), y, c3, fieldH });
+                put (atkBar, { col3 (1), y, c3, fieldH });
+                put (relBar, { col3 (2), y, c3, fieldH });
+                y += fieldH + 8;
+                put (mixBar, { col3 (0), y, c3, fieldH });
+                if (val ("ddet") < 0.5f && val ("dfol") < 0.5f)       // Band detector with its own filter
+                {
+                    put (dFreqBar, { col3 (1), y, c3, fieldH });
+                    if (type == EQ::Peak) put (dQBar, { col3 (2), y, c3, fieldH });
+                }
                 y += fieldH + 4;
             }
         }
@@ -1063,37 +1119,148 @@ private:
         repaint();
     }
 
+    // ---- the Rest -> Active curve: level (x, -60 ... 0 dB) against the band's gain (y). Handles can be dragged.
+    enum GcHandle { gcNone = 0, gcRest, gcActive, gcThr, gcWidL, gcWidR };
+
+    struct GcGeom
+    {
+        juce::Rectangle<float> plot;
+        float span = 6.0f, thr = -24.0f, wid = 6.0f, rest = 0.0f, active = -3.0f;
+        static constexpr float lo = -60.0f, hi = 0.0f;
+        float X (float lv) const { return plot.getX() + plot.getWidth() * (lv - lo) / (hi - lo); }
+        float Y (float gd) const { return plot.getCentreY() - plot.getHeight() * 0.5f * juce::jlimit (-1.0f, 1.0f, gd / span); }
+        float levelAt (float x) const { return lo + (hi - lo) * (x - plot.getX()) / plot.getWidth(); }
+        float gainAt (float y) const { return (plot.getCentreY() - y) / (plot.getHeight() * 0.5f) * span; }
+        juce::Point<float> pos (GcHandle h) const
+        {
+            const float xl = juce::jlimit (plot.getX(), plot.getRight(), X (thr - wid * 0.5f));
+            const float xr = juce::jlimit (plot.getX(), plot.getRight(), X (thr + wid * 0.5f));
+            switch (h)
+            {
+                case gcRest:   return { plot.getX() + 9.0f, Y (rest) };
+                case gcActive: return { plot.getRight() - 9.0f, Y (active) };
+                case gcThr:    return { X (thr), Y (0.5f * (rest + active)) };
+                case gcWidL:   return { xl, Y (rest) };
+                case gcWidR:   return { xr, Y (active) };
+                default:       return {};
+            }
+        }
+    };
+
+    GcGeom gcGeom() const
+    {
+        GcGeom q;
+        q.plot = gcRect.toFloat().reduced (8.0f, 8.0f);
+        q.rest = val ("gain");  q.active = val ("dgain");  q.thr = val ("dthr");  q.wid = val ("dwid");
+        if (val ("dauto") > 0.5f && live) q.thr = proc.effThr[(size_t) band].load();
+        // the vertical scale: +-span dB, in steps of 3. Frozen while a handle is being dragged, so it does not slide under the mouse.
+        q.span = gcSpanFrozen > 0.0f ? gcSpanFrozen
+                                     : juce::jlimit (6.0f, 30.0f, std::ceil (juce::jmax (std::abs (q.rest), std::abs (q.active)) * 1.3f / 3.0f) * 3.0f);
+        return q;
+    }
+
+    bool gcActiveNow() const { return tab == 1 && band >= 0 && ! gcRect.isEmpty() && val ("dyn") > 0.5f && EQ::hasGain ((int) std::lround (val ("type"))); }
+
+    GcHandle gcHit (juce::Point<float> p) const
+    {
+        const auto q = gcGeom();
+        const bool autoOn = val ("dauto") > 0.5f;
+        GcHandle best = gcNone;
+        float bestD = 10.0f;                                    // pick the nearest handle within 10 px
+        for (auto h : { gcRest, gcActive, gcWidL, gcWidR, gcThr })     // feet first: when they sit on the threshold, they win and the width can grow
+        {
+            if (h == gcThr && autoOn) continue;                 // the Auto threshold is not draggable
+            const float d = p.getDistanceFrom (q.pos (h));
+            if (d < bestD) { bestD = d; best = h; }
+        }
+        return best;
+    }
+
+    void gcSetParam (const char* n, float v)
+    {
+        if (auto* pr = proc.apvts.getParameter (EQ::id (band, n)))
+            pr->setValueNotifyingHost (pr->convertTo0to1 (pr->getNormalisableRange().snapToLegalValue (v)));
+    }
+
+    static const char* gcParam (GcHandle h)
+    {
+        switch (h) { case gcRest: return "gain"; case gcActive: return "dgain"; case gcThr: return "dthr"; default: return "dwid"; }
+    }
+
+    void gcMouseDown (const juce::MouseEvent& e)
+    {
+        gcDrag = gcHit (e.position);
+        if (gcDrag == gcNone) return;
+        const auto q = gcGeom();
+        gcSpanFrozen = q.span;
+        gcLastPos = e.position;
+        gcValue = gcDrag == gcRest ? q.rest : gcDrag == gcActive ? q.active : gcDrag == gcThr ? q.thr : q.wid;
+        if (auto* pr = proc.apvts.getParameter (EQ::id (band, gcParam (gcDrag)))) pr->beginChangeGesture();
+        repaint (gcRect.expanded (2));
+    }
+
+    void gcMouseDrag (const juce::MouseEvent& e)
+    {
+        if (gcDrag == gcNone) return;
+        const auto q = gcGeom();
+        const float fine = e.mods.isShiftDown() ? 0.1f : 1.0f;      // Shift = fine
+        const auto d = (e.position - gcLastPos) * fine;
+        gcLastPos = e.position;
+        const float dxDb = d.x / q.plot.getWidth() * (GcGeom::hi - GcGeom::lo);
+        const float dyDb = -d.y / (q.plot.getHeight() * 0.5f) * q.span;
+        switch (gcDrag)
+        {
+            case gcRest:   gcValue = juce::jlimit (-q.span, q.span, gcValue + dyDb);  gcSetParam ("gain",  gcValue); break;
+            case gcActive: gcValue = juce::jlimit (-q.span, q.span, gcValue + dyDb);  gcSetParam ("dgain", gcValue); break;
+            case gcThr:    gcValue = juce::jlimit (-60.0f, 0.0f, gcValue + dxDb);     gcSetParam ("dthr",  gcValue); break;
+            case gcWidL:   gcValue = juce::jlimit (0.1f, 40.0f, gcValue - 2.0f * dxDb); gcSetParam ("dwid", gcValue); break;
+            case gcWidR:   gcValue = juce::jlimit (0.1f, 40.0f, gcValue + 2.0f * dxDb); gcSetParam ("dwid", gcValue); break;
+            default: break;
+        }
+        repaint (gcRect.expanded (2));
+    }
+
+    void gcMouseUp()
+    {
+        if (gcDrag == gcNone) return;
+        if (auto* pr = proc.apvts.getParameter (EQ::id (band, gcParam (gcDrag)))) pr->endChangeGesture();
+        gcDrag = gcNone;
+        gcSpanFrozen = 0.0f;
+        repaint (gcRect.expanded (2));
+    }
+
     void paintGainComputer (juce::Graphics& g) const
     {
         using namespace juce;
         const auto r = gcRect.toFloat();
         if (r.isEmpty()) return;
-        const bool dynOn = val ("dyn") > 0.5f;
-        const float gain = val ("gain"), knee = val ("dknee"), ratio = val ("dratio");
-        const int mode = (int) std::lround (val ("dmode"));
-        float thr = val ("dthr");
-        if (val ("dauto") > 0.5f && live) thr = proc.effThr[(size_t) band].load();
+        const bool dynOn = val ("dyn") > 0.5f, autoOn = val ("dauto") > 0.5f;
+        const auto q = gcGeom();
+        const auto& plot = q.plot;
 
         g.setColour (kField);
         g.fillRoundedRectangle (r, 6.0f);
-        const auto plot = r.reduced (8.0f, 8.0f);
-        const float lo = -60.0f, hi = 0.0f;
-        const float gMax = juce::jmax (1.0f, std::abs (gain));
-        auto X = [&] (float lv) { return plot.getX() + plot.getWidth() * (lv - lo) / (hi - lo); };
-        auto Y = [&] (float gd) { return gain >= 0.0f ? plot.getBottom() - plot.getHeight() * gd / gMax
-                                                      : plot.getY() + plot.getHeight() * (-gd) / gMax; };
 
         g.setColour (Colours::white.withAlpha (0.06f));
-        g.drawHorizontalLine ((int) Y (0.0f), plot.getX(), plot.getRight());
+        g.drawHorizontalLine ((int) q.Y (0.0f), plot.getX(), plot.getRight());
         g.setColour (kAmber.withAlpha (dynOn ? 0.55f : 0.25f));
-        g.drawVerticalLine ((int) X (thr), plot.getY(), plot.getBottom());
+        g.drawVerticalLine ((int) q.X (q.thr), plot.getY(), plot.getBottom());
+
+        // the transition zone, lightly shaded
+        if (dynOn)
+        {
+            const float xl = jlimit (plot.getX(), plot.getRight(), q.X (q.thr - q.wid * 0.5f));
+            const float xr = jlimit (plot.getX(), plot.getRight(), q.X (q.thr + q.wid * 0.5f));
+            g.setColour (kAmber.withAlpha (0.07f));
+            g.fillRect (Rectangle<float> (xl, plot.getY(), juce::jmax (1.0f, xr - xl), plot.getHeight()));
+        }
 
         Path curve;
-        for (int i = 0; i <= 80; ++i)
+        for (int i = 0; i <= 120; ++i)
         {
-            const float lv = lo + (hi - lo) * (float) i / 80.0f;
-            const float gd = dynOn ? dynGain (lv, thr, knee, ratio, gain, mode) : gain;
-            const auto pt = Point<float> (X (lv), Y (gd));
+            const float lv = GcGeom::lo + (GcGeom::hi - GcGeom::lo) * (float) i / 120.0f;
+            const float gd = dynOn ? dynGain (lv, q.thr, q.wid, q.rest, q.active) : q.rest;
+            const auto pt = Point<float> (q.X (lv), q.Y (gd));
             if (i == 0) curve.startNewSubPath (pt); else curve.lineTo (pt);
         }
         g.setColour (col.withAlpha (dynOn ? 0.95f : 0.35f));
@@ -1101,15 +1268,54 @@ private:
 
         g.setColour (kText.withAlpha (0.4f));
         g.setFont (9.0f);
-        g.drawText ("level " + String (lo, 0) + " ... 0 dB", r.reduced (8.0f, 2.0f), Justification::bottomRight);
-        g.drawText (String (gain, 1) + " dB", r.reduced (8.0f, 2.0f), Justification::topLeft);
+        g.drawText ("level " + String (GcGeom::lo, 0) + " ... 0 dB", r.reduced (8.0f, 2.0f), Justification::bottomRight);
+        g.drawText (juce::String::fromUTF8 ("\xc2\xb1") + String (q.span, 0) + " dB", r.reduced (8.0f, 2.0f), Justification::topLeft);
 
-        if (dynOn && live)    // live dot: where the signal is on the curve right now
+        if (dynOn)
         {
-            const float lv = juce::jlimit (lo, hi, proc.effLevel[(size_t) band].load());
-            const float gd = dynGain (lv, thr, knee, ratio, gain, mode);
-            g.setColour (Colours::white);
-            g.fillEllipse (Rectangle<float> (7.0f, 7.0f).withCentre ({ X (lv), Y (gd) }));
+            // handles: Rest and Active (up / down), threshold (left / right), width (the two feet of the slope)
+            auto dot = [&] (GcHandle h, Colour c, bool ring)
+            {
+                if (h == gcThr && autoOn) return;
+                const auto p = q.pos (h);
+                const bool on = h == gcDrag || (gcDrag == gcNone && h == gcHover);
+                const float rad = (ring ? 4.0f : 4.5f) + (on ? 1.5f : 0.0f);
+                if (h == gcWidL || h == gcWidR)
+                {
+                    g.setColour (on ? c : c.withAlpha (0.7f));
+                    g.drawRect (Rectangle<float> (rad * 1.4f, rad * 1.4f).withCentre (p), 1.4f);
+                    return;
+                }
+                g.setColour (Colour (0xff121212));
+                g.fillEllipse (Rectangle<float> (rad * 2.0f, rad * 2.0f).withCentre (p));
+                g.setColour (on ? Colours::white : c);
+                if (ring) g.drawEllipse (Rectangle<float> (rad * 2.0f, rad * 2.0f).withCentre (p), 1.6f);
+                else      g.fillEllipse (Rectangle<float> (rad * 2.0f - 3.0f, rad * 2.0f - 3.0f).withCentre (p));
+            };
+            dot (gcWidL, kAmber, true);  dot (gcWidR, kAmber, true);
+            dot (gcThr, kAmber, true);
+            dot (gcRest, col, false);    dot (gcActive, col, false);
+
+            // while a handle is dragged (or under the mouse) its exact value is shown in the corner
+            const GcHandle h = gcDrag != gcNone ? gcDrag : gcHover;
+            if (h != gcNone)
+            {
+                const char* pid = gcParam (h);
+                if (auto* pr = proc.apvts.getParameter (EQ::id (band, pid)))
+                {
+                    const String name = h == gcRest ? "Rest" : h == gcActive ? "Active" : h == gcThr ? "Threshold" : "Width";
+                    g.setColour (kText.withAlpha (0.85f));
+                    g.setFont (monoFont (11.0f));
+                    g.drawText (name + "  " + pr->getCurrentValueAsText(), r.reduced (8.0f, 2.0f), Justification::topRight);
+                }
+            }
+
+            if (live)    // live dot: where the signal is on the curve right now
+            {
+                const float lv = jlimit (GcGeom::lo, GcGeom::hi, proc.effLevel[(size_t) band].load());
+                g.setColour (Colours::white);
+                g.fillEllipse (Rectangle<float> (7.0f, 7.0f).withCentre ({ q.X (lv), q.Y (dynGain (lv, q.thr, q.wid, q.rest, q.active)) }));
+            }
         }
     }
 
@@ -1155,11 +1361,18 @@ private:
 
     std::array<IconButton, 3> tabs;
     IconButton prevBtn, nextBtn, soloBtn, muteBtn, closeBtn;
-    ValueField freqBar, gainBar, qBar, thrBar, kneeBar, ratioBar, atkBar, relBar, mixBar, xRateBar, xAmtBar, yRateBar, yAmtBar, xSmBar, ySmBar, slopeBar;
+    ValueField freqBar, gainBar, qBar, thrBar, widBar, restBar, actBar, dFreqBar, dQBar, atkBar, relBar, mixBar,
+               xRateBar, xAmtBar, yRateBar, yAmtBar, xSmBar, ySmBar, slopeBar;
     ChoiceField xSyncFld { "Sync", fieldLook }, ySyncFld { "Sync", fieldLook };
     SegRow xShapeRow { shapeItems() }, yShapeRow { shapeItems() };
-    CycleField dModeFld { "Mode", juce::StringArray { "Above", "Below" } };
-    ToggleField dynBtn { "Dynamic" }, autoBtn { "Auto" }, scBtn { "Sidechain" };
+    CycleField detFld { "Detector", EQ::detectorNames() };
+    ToggleField dynBtn { "Dynamic" }, autoBtn { "Auto" }, followBtn { "Follow" };
+
+    // the Rest -> Active curve: handle under the mouse / being dragged, and the state of the drag
+    GcHandle gcHover = gcNone, gcDrag = gcNone;
+    juce::Point<float> gcLastPos;
+    float gcValue = 0.0f, gcSpanFrozen = 0.0f;
+    std::array<float, 5> gcLast {};
     std::vector<std::shared_ptr<void>> att;
 
     std::vector<Cap> caps;

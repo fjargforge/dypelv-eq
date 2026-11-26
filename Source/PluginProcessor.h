@@ -83,9 +83,9 @@ inline const juce::StringArray& syncNames()
     static const juce::StringArray s { "Free", "4 bars", "2 bars", "1 bar", "1/2", "1/4", "1/8", "1/16", "1/32", "1/4 T", "1/8 T", "1/16 T" };
     return s;
 }
-inline const juce::StringArray& dynModeNames()
+inline const juce::StringArray& detectorNames()
 {
-    static const juce::StringArray s { "Compress", "Expand" };   // Compress: acts above the threshold. Expand: full when quiet, fades as the level rises above it
+    static const juce::StringArray s { "Band", "Full", "Sidechain" };   // Band: the band's own range of the signal. Full: the whole signal. Sidechain: the external input
     return s;
 }
 inline const juce::StringArray& splitNames()
@@ -104,6 +104,55 @@ inline bool hasQ (int) { return true; }
 inline juce::String fmtFreq (float v)
 {
     return v >= 1000.0f ? juce::String (v / 1000.0f, 3) + " kHz" : juce::String ((int) std::lround (v)) + " Hz";
+}
+
+// Exact readout for the fields and the host: always three decimals, 62.060 Hz or 1.235 kHz
+inline juce::String fmtFreqExact (float v)
+{
+    return v < 1000.0f ? juce::String (v, 3) + " Hz" : juce::String (v / 1000.0f, 3) + " kHz";
+}
+
+inline float parseNumber (const juce::String& t)
+{
+    return t.trim().replace (juce::String::fromUTF8 ("\xe2\x88\x92"), "-").replace (",", ".").getFloatValue();
+}
+
+// "D#3", "bb2", "A4" -> Hz, or -1 when the text is not a note. Same octave numbering as the note shown beside the frequency (C3 = middle C).
+inline float noteToHz (const juce::String& txt)
+{
+    const auto s = txt.trim().toLowerCase();
+    if (s.length() < 2 || s[0] < 'a' || s[0] > 'g') return -1.0f;
+    static const int semi[7] = { 9, 11, 0, 2, 4, 5, 7 };           // a b c d e f g, counted from C
+    int n = semi[s[0] - 'a'], i = 1;
+    if (s[i] == '#') { ++n; ++i; }
+    else if (s[i] == 'b' && s.length() > 2) { --n; ++i; }
+    const auto oct = s.substring (i);
+    if (oct.isEmpty() || ! oct.containsOnly ("-0123456789")) return -1.0f;
+    const int midi = 12 * (oct.getIntValue() + 2) + n;
+    return (float) (440.0 * std::pow (2.0, (midi - 69) / 12.0));
+}
+
+// "62.06", "1.2k", "1200 hz", "d#3"
+inline float parseFreq (const juce::String& t)
+{
+    const float hz = noteToHz (t);
+    if (hz > 0.0f) return hz;
+    const auto s = t.trim().toLowerCase();
+    const float v = parseNumber (s);
+    return s.contains ("k") ? v * 1000.0f : v;
+}
+
+// Dynamics before 0.2.0 (Compress / Expand with Ratio and Knee) expressed in the Rest -> Active model.
+//   Compress acts above the threshold: Rest = 0, Active = the old Gain.   Expand acts below it: Rest = the old Gain, Active = 0.
+// The old curve starts knee/2 before the threshold and has used the whole Gain after run + knee/2; the new transition covers the same span.
+struct OldDyn { float rest, active, thr, wid; };
+inline OldDyn convertOldDyn (float gain, float thr, bool expand, float ratio, float knee)
+{
+    const float slope = 1.0f - 1.0f / juce::jmax (1.0f, ratio);
+    const float run = slope > 0.01f ? std::abs (gain) / slope : 40.0f;       // dB of level over which the whole Gain is used
+    const float wid = juce::jlimit (0.1f, 40.0f, run + knee);
+    return expand ? OldDyn { gain, 0.0f, juce::jlimit (-60.0f, 0.0f, thr - run * 0.5f), wid }
+                  : OldDyn { 0.0f, gain, juce::jlimit (-60.0f, 0.0f, thr + run * 0.5f), wid };
 }
 
 // ---- allocation-free biquads (same RBJ formulas JUCE uses, so GUI and audio agree)
@@ -221,7 +270,7 @@ public:
     // effective (LFO + dynamics applied) frequency / gain per band, for the GUI
     std::array<std::atomic<float>, EQ::numBands> effF {}, effG {}, effQ {}, effG2 {};
     // live detector level / effective threshold (dB) and LFO phases (0..1), for the band card previews
-    std::array<std::atomic<float>, EQ::numBands> effLevel {}, effThr {}, lfoPhX {}, lfoPhY {};
+    std::array<std::atomic<float>, EQ::numBands> effLevel {}, effThr {}, effDyn {}, lfoPhX {}, lfoPhY {};   // effDyn: dB the dynamics add to the band right now
     std::atomic<uint32_t> blockCount { 0 };
     std::atomic<float> autoGainDb { 0.0f };
     std::atomic<bool> soloMono { false };      // Side is soloed but the signal is mono (left = right), so there is nothing to hear
@@ -262,8 +311,9 @@ private:
     {
         std::atomic<float> *on = nullptr, *type = nullptr, *ch = nullptr, *freq = nullptr, *gain = nullptr,
                            *q = nullptr, *slope = nullptr, *solo = nullptr, *mute = nullptr, *split = nullptr,
-                           *dyn = nullptr, *dthr = nullptr, *dknee = nullptr, *datk = nullptr, *drel = nullptr,
-                           *dmix = nullptr, *dauto = nullptr, *dmode = nullptr, *dratio = nullptr, *dsc = nullptr,
+                           *dyn = nullptr, *dthr = nullptr, *datk = nullptr, *drel = nullptr,
+                           *dmix = nullptr, *dauto = nullptr, *dgain = nullptr, *dwid = nullptr, *ddet = nullptr,
+                           *dfol = nullptr, *dfreq = nullptr, *dq = nullptr,
                            *lxd = nullptr, *lyd = nullptr,
                            *lxs = nullptr, *lxr = nullptr, *lxa = nullptr, *lxm = nullptr, *lym = nullptr,
                            *lys = nullptr, *lyr = nullptr, *lya = nullptr;
